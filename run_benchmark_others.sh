@@ -29,6 +29,7 @@ CORE_DIR="$HOME/nedovision/nedo-vision-worker-core-v2"
 SESSION="nedovision-benchmark"
 RUN_TAG="${RUN_TAG:-$(date +%Y%m%d_%H%M)}"
 OUTPUT_DIR="benchmark_output/others_${RUN_TAG}"
+WORKDIR="$HOME/nedovision"
 
 DEVICE="cuda"
 WARMUP=50
@@ -62,7 +63,7 @@ B3_MODEL_IDS=(
 B2_PIPELINE_ID="3cf5199c-7833-4289-a107-bcb2acdf4b37"
 
 # B3 video path — override via env if your video is elsewhere
-B3_VIDEO_PATH="${B3_VIDEO_PATH:-$HOME/nedovision/sample.mp4}"
+B3_VIDEO_PATH="${B3_VIDEO_PATH:-$HOME/nedovision/sample2_100x.mp4}"
 
 # ─── Guards ───────────────────────────────────────────────────────────────────
 [[ -z "${RTMP_SERVER:-}" ]] && die "RTMP_SERVER is not set. B2 requires a live RTSP stream. Export it before running."
@@ -165,6 +166,38 @@ SEQUENTIAL_CMD="${CMD_CORE} \
   && ${CMD_B3} \
   && echo '' \
   && echo '=== ALL EXPERIMENTS DONE ==='"
+
+# ─── Prepare B3 video ─────────────────────────────────────────────────────────
+VIDEO_DIR="$WORKDIR"
+SAMPLE_RAW="$VIDEO_DIR/sample2.mp4"
+SAMPLE_COPY="$VIDEO_DIR/sample2_copy.mkv"
+SAMPLE_100X="$VIDEO_DIR/sample2_100x.mp4"
+SAMPLE_URL="https://raw.githubusercontent.com/jhiven/nedo-vision-experiment-script/refs/heads/main/sample2.mp4"
+
+info "Preparing B3 video..."
+
+if [[ ! -f "$SAMPLE_100X" ]]; then
+    if [[ ! -f "$SAMPLE_RAW" ]]; then
+        info "Downloading sample2.mp4..."
+        wget -q --show-progress "$SAMPLE_URL" -O "$SAMPLE_RAW" \
+            || die "Failed to download sample2.mp4"
+        success "sample2.mp4 downloaded."
+    else
+        warn "sample2.mp4 already exists, skipping download."
+    fi
+
+    info "Running ffmpeg: copy to mkv..."
+    ffmpeg -i "$SAMPLE_RAW" -c copy "$SAMPLE_COPY" -y -loglevel error \
+        || die "ffmpeg step 1 failed (copy to mkv)"
+
+    info "Running ffmpeg: loop 100x..."
+    ffmpeg -stream_loop 100 -i "$SAMPLE_COPY" -c copy "$SAMPLE_100X" -y -loglevel error \
+        || die "ffmpeg step 2 failed (loop 100x)"
+
+    success "B3 video ready: $SAMPLE_100X"
+else
+    warn "sample2_100x.mp4 already exists, skipping video preparation."
+fi
 
 # ─── Launch tmux ──────────────────────────────────────────────────────────────
 info "Starting tmux session: $SESSION"

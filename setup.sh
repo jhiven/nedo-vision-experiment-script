@@ -45,7 +45,7 @@ echo -e "${BOLD}==============================${NC}"
 info "Installing system dependencies..."
 apt-get update -qq
 apt-get install -y -qq \
-    tmux git curl wget build-essential libssl-dev zlib1g-dev \
+    tmux git curl wget ffmpeg build-essential libssl-dev zlib1g-dev \
     libbz2-dev libreadline-dev libsqlite3-dev libffi-dev \
     liblzma-dev libncursesw5-dev xz-utils tk-dev \
     > /dev/null 2>&1
@@ -53,7 +53,7 @@ success "System packages installed."
 
 # ─── 2. tmux config ───────────────────────────────────────────────────────────
 # Replace this URL with your own dotfiles repo if needed
-TMUX_CONF_URL="https://raw.githubusercontent.com/jhiven/dotfiles/main/.tmux.conf"
+TMUX_CONF_URL="https://raw.githubusercontent.com/jhiven/nedo-vision-experiment-script/refs/heads/main/.tmux.conf"
 info "Downloading tmux config..."
 if curl -fsSL "$TMUX_CONF_URL" -o "$HOME/.tmux.conf" 2>/dev/null; then
     success "tmux config downloaded."
