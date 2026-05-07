@@ -1,20 +1,19 @@
 #!/usr/bin/env bash
 # =============================================================================
 # run_benchmark_others.sh — E1, E2, E3, E4, B1, B2, B3
-# Target instance : L40S (or any CUDA instance)
+# Target instance : L40S
 # Estimated time  : ~2 hours
 #
-# Run AFTER setup.sh completes successfully.
+# Required env vars:
+#   RTMP_SERVER     — RTSP stream URL (required for B2)
+#   B3_VIDEO_PATH   — path to video file for B3 (default: ~/nedovision/sample.mp4)
 #
-# Usage:
-#   bash run_benchmark_others.sh
-#
-# Optional env overrides:
-#   RTMP_SERVER      — required for B2 (live config-swap benchmark)
-#   B2_PIPELINE_ID   — required for B2
-#   B3_VIDEO_PATH    — optional static video path for B3
-#   SKIP_B2          — set to "1" to skip B2 explicitly
-#   RUN_TAG          — label appended to output dir
+# Optional env vars:
+#   RUN_TAG         — label appended to output dir (default: current datetime)
+#   MINIO_ENDPOINT  — MinIO endpoint for auto-sync
+#   MINIO_ACCESS_KEY
+#   MINIO_SECRET_KEY
+#   MINIO_BUCKET    — default: nedovision-benchmark
 # =============================================================================
 
 set -euo pipefail
@@ -32,47 +31,42 @@ RUN_TAG="${RUN_TAG:-$(date +%Y%m%d_%H%M)}"
 OUTPUT_DIR="benchmark_output/others_${RUN_TAG}"
 
 DEVICE="cuda"
-WARMUP=50     # minimum for cuda
+WARMUP=50
 SOURCE="dummy"
+DURATION=300   # seconds per experiment/level
 
-# Duration per experiment (seconds)
-# 5 min per complexity level / tier is a safe baseline
-# E1: 3 levels × 2 pipelines × 300s = ~30 min
-# E2: 3 N-values × 300s             = ~15 min
-# E3: 3 levels × 300s               = ~15 min
-# E4: 4 tiers × 2 pipelines × 300s  = ~40 min
-# B1/B3: driven by --trials/--frames
-DURATION=300
+# ─── Fixed model IDs from registry ───────────────────────────────────────────
+# B1 models: yolov8n, yolov8s, yolov8m (or equivalent UUIDs)
+B1_MODEL_IDS=(
+    019dff8c-6550-7a41-812e-1585d9067937
+    019dff8d-3354-7472-be12-16400911eaae
+    019dff8e-1853-73ce-bee1-773c44fc9361
+    019661ad-c7f2-7e9a-9a0c-43bd9053b435
+)
 
-B1_TRIALS=30
-B2_TRIALS=20
-B3_FRAMES=100
+# B2 models: includes RF-DETR for cross-architecture swap pair
+B2_MODEL_IDS=(
+    019dff8c-6550-7a41-812e-1585d9067937
+    019dff8d-3354-7472-be12-16400911eaae
+    019dff8e-1853-73ce-bee1-773c44fc9361
+    019661ad-c7f2-7e9a-9a0c-43bd9053b435
+)
 
-# ─── Optional args ────────────────────────────────────────────────────────────
-RTMP_ARG=""
-B2_PIPELINE_ARG=""
-B3_VIDEO_ARG=""
+# B3 models: includes RF-DETR for schema validation
+B3_MODEL_IDS=(
+    019dff8d-3354-7472-be12-16400911eaae
+    019dff8e-1853-73ce-bee1-773c44fc9361
+    019661ad-c7f2-7e9a-9a0c-43bd9053b435
+)
 
-if [[ -n "${RTMP_SERVER:-}" ]]; then
-    RTMP_ARG="--rtmp-server ${RTMP_SERVER}"
-fi
-if [[ -n "${B2_PIPELINE_ID:-}" ]]; then
-    B2_PIPELINE_ARG="--b2-pipeline-id ${B2_PIPELINE_ID}"
-fi
-if [[ -n "${B3_VIDEO_PATH:-}" ]]; then
-    B3_VIDEO_ARG="--b3-video-path ${B3_VIDEO_PATH}"
-fi
+B2_PIPELINE_ID="3cf5199c-7833-4289-a107-bcb2acdf4b37"
 
-# ─── Determine BYOM set ───────────────────────────────────────────────────────
-BYOM_EXPS="b1 b3"
-if [[ "${SKIP_B2:-0}" == "1" ]]; then
-    warn "SKIP_B2=1 — skipping B2."
-elif [[ -z "${RTMP_SERVER:-}" ]] || [[ -z "${B2_PIPELINE_ID:-}" ]]; then
-    warn "RTMP_SERVER or B2_PIPELINE_ID not set — skipping B2."
-    warn "Set both to include B2 in the run."
-else
-    BYOM_EXPS="b1 b2 b3"
-fi
+# B3 video path — override via env if your video is elsewhere
+B3_VIDEO_PATH="${B3_VIDEO_PATH:-$HOME/nedovision/sample.mp4}"
+
+# ─── Guards ───────────────────────────────────────────────────────────────────
+[[ -z "${RTMP_SERVER:-}" ]] && die "RTMP_SERVER is not set. B2 requires a live RTSP stream. Export it before running."
+[[ -f "$B3_VIDEO_PATH" ]]   || die "B3 video not found at: $B3_VIDEO_PATH. Set B3_VIDEO_PATH or place video there."
 
 # ─── Pre-flight ───────────────────────────────────────────────────────────────
 [[ -d "$CORE_DIR" ]] || die "worker-core not found at $CORE_DIR. Run setup.sh first."
@@ -90,77 +84,113 @@ PYCHECK
 
 mkdir -p "$OUTPUT_DIR"
 success "Pre-flight passed."
+deactivate
 
-# ─── Commands ─────────────────────────────────────────────────────────────────
-CORE_CMD="cd $CORE_DIR && source .venv/bin/activate && \
-CORE_STORAGE_PATH=\"../data\" \
-python -m benchmark \
+# ─── Auto-sync setup ──────────────────────────────────────────────────────────
+start_autosync() {
+    local src_dir="$1"
+    local tag="$2"
+    local bucket="${MINIO_BUCKET:-nedovision-benchmark}"
+
+    if ! command -v rclone &>/dev/null; then
+        warn "rclone not found — skipping auto-sync."
+        return
+    fi
+    if ! rclone lsd minio: &>/dev/null 2>&1; then
+        warn "MinIO not reachable — skipping auto-sync."
+        return
+    fi
+
+    rclone mkdir "minio:${bucket}/${tag}" 2>/dev/null || true
+
+    local cron_line="*/5 * * * * rclone sync \"${src_dir}\" \"minio:${bucket}/${tag}\" --log-file /tmp/rclone_sync.log 2>&1"
+    (crontab -l 2>/dev/null | grep -v "nedovision-benchmark"; echo "$cron_line") | crontab -
+
+    success "Auto-sync: every 5 min → minio:${bucket}/${tag}"
+}
+
+start_autosync "$CORE_DIR/$OUTPUT_DIR" "$RUN_TAG"
+
+# ─── Build commands ───────────────────────────────────────────────────────────
+
+# Shared prefix untuk semua command
+BASE="cd $CORE_DIR && source .venv/bin/activate"
+BENCH_PREFIX="CORE_STORAGE_PATH=\"../data\" python -m benchmark"
+COMMON_FLAGS="--device $DEVICE --warmup $WARMUP --no-speed --markdown --pdf-charts --storage-path \"../data\" --output-dir $OUTPUT_DIR"
+
+CMD_CORE="${BASE} && ${BENCH_PREFIX} \
   --experiment e1 e2 e3 e4 \
-  --device $DEVICE \
   --source $SOURCE \
   --duration $DURATION \
-  --warmup $WARMUP \
-  --no-speed \
-  --markdown \
-  --pdf-charts \
-  --storage-path \"../data\" \
-  --output-dir $OUTPUT_DIR \
+  ${COMMON_FLAGS} \
   2>&1 | tee ${OUTPUT_DIR}/core_run.log"
 
-BYOM_CMD="cd $CORE_DIR && source .venv/bin/activate && \
-CORE_STORAGE_PATH=\"../data\" \
-python -m benchmark \
-  --experiment $BYOM_EXPS \
-  --device $DEVICE \
-  --source $SOURCE \
-  --warmup $WARMUP \
-  --no-speed \
-  --markdown \
-  --pdf-charts \
-  --storage-path \"../data\" \
-  --b1-trials $B1_TRIALS \
-  --b2-trials $B2_TRIALS \
-  --b3-frames $B3_FRAMES \
-  --output-dir $OUTPUT_DIR \
-  $RTMP_ARG \
-  $B2_PIPELINE_ARG \
-  $B3_VIDEO_ARG \
-  2>&1 | tee ${OUTPUT_DIR}/byom_run.log"
+CMD_B1="${BASE} && ${BENCH_PREFIX} \
+  --experiment b1 \
+  --b1-model-ids ${B1_MODEL_IDS[*]} \
+  --b1-trials 30 \
+  ${COMMON_FLAGS} \
+  2>&1 | tee ${OUTPUT_DIR}/b1_run.log"
+
+CMD_B2="${BASE} && ${BENCH_PREFIX} \
+  --experiment b2 \
+  --source rtsp \
+  --rtmp-server ${RTMP_SERVER} \
+  --b2-pipeline-id ${B2_PIPELINE_ID} \
+  --b2-model-ids ${B2_MODEL_IDS[*]} \
+  --b2-trials 30 \
+  --b2-poll-interval 1.0 \
+  --b2-timeout 60 \
+  ${COMMON_FLAGS} \
+  2>&1 | tee ${OUTPUT_DIR}/b2_run.log"
+
+CMD_B3="${BASE} && ${BENCH_PREFIX} \
+  --experiment b3 \
+  --b3-model-ids ${B3_MODEL_IDS[*]} \
+  --b3-frames 100 \
+  --b3-video-path \"${B3_VIDEO_PATH}\" \
+  ${COMMON_FLAGS} \
+  2>&1 | tee ${OUTPUT_DIR}/b3_run.log"
+
+# Sequential runner — jalan satu per satu, berhenti kalau ada yang gagal
+SEQUENTIAL_CMD="${CMD_CORE} \
+  && echo '' \
+  && echo '>>> [1/3] B1 cold-start starting...' \
+  && ${CMD_B1} \
+  && echo '' \
+  && echo '>>> [2/3] B2 config-swap starting...' \
+  && ${CMD_B2} \
+  && echo '' \
+  && echo '>>> [3/3] B3 schema consistency starting...' \
+  && ${CMD_B3} \
+  && echo '' \
+  && echo '=== ALL EXPERIMENTS DONE ==='"
 
 # ─── Launch tmux ──────────────────────────────────────────────────────────────
 info "Starting tmux session: $SESSION"
 tmux kill-session -t "$SESSION" 2>/dev/null || true
-tmux new-session -d -s "$SESSION" -n "core-exps" -x 220 -y 50
+tmux new-session -d -s "$SESSION" -n "benchmark" -x 220 -y 50
 
-# Window 1: E1 E2 E3 E4 — starts immediately
-tmux send-keys -t "$SESSION:core-exps" "$CORE_CMD" Enter
+# Window 1: semua experiments sequential dalam 1 window
+tmux send-keys -t "$SESSION:benchmark" "$SEQUENTIAL_CMD" Enter
 
-# Window 2: B1 B2/B3 — pre-loaded but NOT sent Enter
-# Run manually after window 1 finishes and you confirm no errors
-tmux new-window -t "$SESSION" -n "byom-exps"
-tmux send-keys -t "$SESSION:byom-exps" \
-    "# Wait for core-exps (window 1) to finish, then press Enter here"
-tmux send-keys -t "$SESSION:byom-exps" ""
-# Load the command into the buffer without executing
-tmux send-keys -t "$SESSION:byom-exps" "" Enter
-tmux send-keys -t "$SESSION:byom-exps" "$BYOM_CMD"
-# Command is typed and waiting — user presses Enter to start
-
-# Window 3: GPU + disk monitor
+# Window 2: GPU + disk monitor
 tmux new-window -t "$SESSION" -n "monitor"
 tmux send-keys -t "$SESSION:monitor" \
-    "watch -n3 'nvidia-smi && echo && df -h $CORE_DIR'" Enter
+    "watch -n3 'nvidia-smi && echo && df -h $CORE_DIR && echo && tail -5 /tmp/rclone_sync.log 2>/dev/null'" Enter
 
 echo ""
 echo -e "${BOLD}Benchmark session started: $SESSION${NC}"
 echo -e "${BOLD}Output dir :${NC} $CORE_DIR/$OUTPUT_DIR"
 echo ""
-echo -e "${BOLD}Windows:${NC}"
-echo -e "  ${CYAN}1. core-exps${NC}  — E1 E2 E3 E4 (running now)"
-echo -e "  ${CYAN}2. byom-exps${NC}  — $(echo "$BYOM_EXPS" | tr ' ' '/') (press Enter after core-exps done)"
-echo -e "  ${CYAN}3. monitor${NC}    — nvidia-smi + disk usage"
+echo -e "${BOLD}Execution order (sequential, auto-stop on error):${NC}"
+echo -e "  1. E1 E2 E3 E4   (~$(( DURATION * 4 * 2 / 60 )) min)"
+echo -e "  2. B1             (30 trials x 3 models)"
+echo -e "  3. B2             (30 trials x 4 swap pairs, needs RTSP)"
+echo -e "  4. B3             (100 frames x 3 models)"
 echo ""
 echo -e "Attach : ${CYAN}tmux attach -t $SESSION${NC}"
 echo -e "Detach : ${CYAN}Ctrl+B then D${NC}"
 echo ""
-echo -e "${YELLOW}B2 included: $(echo "$BYOM_EXPS" | grep -q b2 && echo YES — needs RTSP + pipeline-id || echo NO — set RTMP_SERVER + B2_PIPELINE_ID to enable)${NC}"
+echo -e "${YELLOW}B3 video path: ${B3_VIDEO_PATH}${NC}"
+echo -e "${YELLOW}B2 RTSP: ${RTMP_SERVER}${NC}"

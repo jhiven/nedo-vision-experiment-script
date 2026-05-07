@@ -143,7 +143,7 @@ setup_repo() {
     source .venv/bin/activate
     info "[$label] Using $(python --version)"
     pip install --upgrade pip -q
-    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121 -q
+    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126 -q
     pip install -r requirements.txt -q
     success "[$label] requirements installed."
     deactivate
