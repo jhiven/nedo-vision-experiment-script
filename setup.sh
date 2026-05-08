@@ -8,6 +8,12 @@
 #   GITLAB_TOKEN           — GitLab personal access token (read_repository scope)
 #   WORKER_SERVICE_TOKEN   — token for test_jhiven.py --token argument
 #
+# Optional env vars:
+#   SEAWEEDFS_REMOTE       — rclone remote name (default: seaweedfs_s3)
+#   SEAWEEDFS_ENDPOINT     — SeaweedFS S3 endpoint (default: localhost:8333)
+#   SEAWEEDFS_ACCESS_KEY   — SeaweedFS S3 access key (default: any)
+#   SEAWEEDFS_SECRET_KEY   — SeaweedFS S3 secret key (default: any)
+#
 # Usage:
 #   export GITLAB_USER="your_username"
 #   export GITLAB_TOKEN="glpat-xxxxxxxxxxxx"
@@ -36,6 +42,10 @@ WORKER_SERVICE_BRANCH="feat/pipeline-workflow"
 SETUP_SESSION="nedovision-setup"
 WORKDIR="$HOME/nedovision"
 DATA_DIR="$WORKDIR/data"
+SEAWEEDFS_REMOTE="${SEAWEEDFS_REMOTE:-seaweedfs_s3}"
+SEAWEEDFS_ENDPOINT="${SEAWEEDFS_ENDPOINT:-localhost:8333}"
+SEAWEEDFS_ACCESS_KEY="${SEAWEEDFS_ACCESS_KEY:-any}"
+SEAWEEDFS_SECRET_KEY="${SEAWEEDFS_SECRET_KEY:-any}"
 
 echo -e "${BOLD}==============================${NC}"
 echo -e "${BOLD} Nedo Vision — Instance Setup${NC}"
@@ -45,14 +55,24 @@ echo -e "${BOLD}==============================${NC}"
 info "Installing system dependencies..."
 apt-get update -qq
 apt-get install -y -qq \
-    tmux git curl wget ffmpeg build-essential libssl-dev zlib1g-dev \
+    tmux git curl wget ffmpeg rclone build-essential libssl-dev zlib1g-dev \
     libbz2-dev libreadline-dev libsqlite3-dev libffi-dev \
     liblzma-dev libncursesw5-dev xz-utils tk-dev \
     > /dev/null 2>&1
 success "System packages installed."
 
-# ─── 2. tmux config ───────────────────────────────────────────────────────────
-# Replace this URL with your own dotfiles repo if needed
+# ─── 2. rclone SeaweedFS remote ───────────────────────────────────────────────
+info "Configuring rclone remote: $SEAWEEDFS_REMOTE"
+mkdir -p "$HOME/.config/rclone"
+rclone config create "$SEAWEEDFS_REMOTE" s3 \
+    provider SeaweedFS \
+    access_key_id "$SEAWEEDFS_ACCESS_KEY" \
+    secret_access_key "$SEAWEEDFS_SECRET_KEY" \
+    endpoint "$SEAWEEDFS_ENDPOINT" \
+    >/dev/null
+success "rclone remote '$SEAWEEDFS_REMOTE' configured for $SEAWEEDFS_ENDPOINT."
+
+# ─── 3. tmux config ───────────────────────────────────────────────────────────
 TMUX_CONF_URL="https://raw.githubusercontent.com/jhiven/nedo-vision-experiment-script/refs/heads/main/.tmux.conf"
 info "Downloading tmux config..."
 if curl -fsSL "$TMUX_CONF_URL" -o "$HOME/.tmux.conf" 2>/dev/null; then
@@ -61,7 +81,7 @@ else
     warn "Could not download .tmux.conf — using tmux defaults."
 fi
 
-# ─── 3. pyenv ─────────────────────────────────────────────────────────────────
+# ─── 4. pyenv ─────────────────────────────────────────────────────────────────
 if ! command -v pyenv &>/dev/null; then
     info "Installing pyenv..."
     curl -fsSL https://pyenv.run | bash
@@ -87,7 +107,7 @@ else
     success "pyenv already installed."
 fi
 
-# ─── 4. Python 3.12.12 ────────────────────────────────────────────────────────
+# ─── 5. Python 3.12.12 ────────────────────────────────────────────────────────
 if ! pyenv versions | grep -q "$PYTHON_VERSION"; then
     info "Installing Python $PYTHON_VERSION (this takes a few minutes)..."
     pyenv install "$PYTHON_VERSION"
@@ -96,12 +116,12 @@ else
     success "Python $PYTHON_VERSION already installed."
 fi
 
-# ─── 5. Workdir + shared data dir ─────────────────────────────────────────────
+# ─── 6. Workdir + shared data dir ─────────────────────────────────────────────
 mkdir -p "$WORKDIR" "$DATA_DIR"
 info "Working directory : $WORKDIR"
 info "Shared data dir   : $DATA_DIR  (used as --storage-path ../data by both repos)"
 
-# ─── 6. Clone repos ───────────────────────────────────────────────────────────
+# ─── 7. Clone repos ───────────────────────────────────────────────────────────
 CORE_DIR="$WORKDIR/nedo-vision-worker-core-v2"
 SERVICE_DIR="$WORKDIR/nedo-vision-worker-service"
 
@@ -120,12 +140,12 @@ else
     warn "worker-service already exists, skipping clone."
 fi
 
-# ─── 7. Checkout branches ─────────────────────────────────────────────────────
+# ─── 8. Checkout branches ─────────────────────────────────────────────────────
 git -C "$CORE_DIR"    checkout "$WORKER_CORE_BRANCH"    -q
 git -C "$SERVICE_DIR" checkout "$WORKER_SERVICE_BRANCH" -q
 success "Branches checked out."
 
-# ─── 8. Setup venv + pip install for both repos ───────────────────────────────
+# ─── 9. Setup venv + pip install for both repos ───────────────────────────────
 setup_repo() {
     local dir="$1"
     local label="$2"
@@ -143,7 +163,11 @@ setup_repo() {
     source .venv/bin/activate
     info "[$label] Using $(python --version)"
     pip install --upgrade pip -q
-    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126 -q
+    if [[ "$label" == "worker-core" ]]; then
+        pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126 -q
+    else
+        pip install statsmodels -q
+    fi
     pip install -r requirements.txt -q
     success "[$label] requirements installed."
     deactivate
@@ -153,7 +177,7 @@ setup_repo() {
 setup_repo "$CORE_DIR"    "worker-core"
 setup_repo "$SERVICE_DIR" "worker-service"
 
-# ─── 9. Launch tmux session ───────────────────────────────────────────────────
+# ─── 10. Launch tmux session ──────────────────────────────────────────────────
 info "Launching tmux session: $SETUP_SESSION"
 tmux kill-session -t "$SETUP_SESSION" 2>/dev/null || true
 tmux new-session -d -s "$SETUP_SESSION" -n "worker-core" -x 220 -y 50

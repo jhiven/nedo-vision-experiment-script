@@ -6,14 +6,12 @@
 #
 # Required env vars:
 #   RTMP_SERVER     — RTSP stream URL (required for B2)
-#   B3_VIDEO_PATH   — path to video file for B3 (default: ~/nedovision/sample.mp4)
 #
 # Optional env vars:
 #   RUN_TAG         — label appended to output dir (default: current datetime)
-#   MINIO_ENDPOINT  — MinIO endpoint for auto-sync
-#   MINIO_ACCESS_KEY
-#   MINIO_SECRET_KEY
-#   MINIO_BUCKET    — default: nedovision-benchmark
+#   B3_VIDEO_PATH   — path to video file for B3 (default: ~/nedovision/sample2_100x.mp4)
+#   SEAWEEDFS_REMOTE — rclone remote name configured by setup.sh (default: seaweedfs_s3)
+#   SEAWEEDFS_BUCKET — default: personal
 # =============================================================================
 
 set -euo pipefail
@@ -30,6 +28,8 @@ SESSION="nedovision-benchmark"
 RUN_TAG="${RUN_TAG:-$(date +%Y%m%d_%H%M)}"
 OUTPUT_DIR="benchmark_output/others_${RUN_TAG}"
 WORKDIR="$HOME/nedovision"
+SEAWEEDFS_REMOTE="${SEAWEEDFS_REMOTE:-seaweedfs_s3}"
+SEAWEEDFS_BUCKET="${SEAWEEDFS_BUCKET:-personal}"
 
 DEVICE="cuda"
 WARMUP=50
@@ -63,11 +63,11 @@ B3_MODEL_IDS=(
 B2_PIPELINE_ID="3cf5199c-7833-4289-a107-bcb2acdf4b37"
 
 # B3 video path — override via env if your video is elsewhere
-B3_VIDEO_PATH="${B3_VIDEO_PATH:-$HOME/nedovision/sample2_100x.mp4}"
+DEFAULT_B3_VIDEO_PATH="$HOME/nedovision/sample2_100x.mp4"
+B3_VIDEO_PATH="${B3_VIDEO_PATH:-$DEFAULT_B3_VIDEO_PATH}"
 
 # ─── Guards ───────────────────────────────────────────────────────────────────
 [[ -z "${RTMP_SERVER:-}" ]] && die "RTMP_SERVER is not set. B2 requires a live RTSP stream. Export it before running."
-[[ -f "$B3_VIDEO_PATH" ]]   || die "B3 video not found at: $B3_VIDEO_PATH. Set B3_VIDEO_PATH or place video there."
 
 # ─── Pre-flight ───────────────────────────────────────────────────────────────
 [[ -d "$CORE_DIR" ]] || die "worker-core not found at $CORE_DIR. Run setup.sh first."
@@ -87,37 +87,21 @@ mkdir -p "$OUTPUT_DIR"
 success "Pre-flight passed."
 deactivate
 
-# ─── Auto-sync setup ──────────────────────────────────────────────────────────
-start_autosync() {
-    local src_dir="$1"
-    local tag="$2"
-    local bucket="${MINIO_BUCKET:-nedovision-benchmark}"
-
-    if ! command -v rclone &>/dev/null; then
-        warn "rclone not found — skipping auto-sync."
-        return
-    fi
-    if ! rclone lsd minio: &>/dev/null 2>&1; then
-        warn "MinIO not reachable — skipping auto-sync."
-        return
-    fi
-
-    rclone mkdir "minio:${bucket}/${tag}" 2>/dev/null || true
-
-    local cron_line="*/5 * * * * rclone sync \"${src_dir}\" \"minio:${bucket}/${tag}\" --log-file /tmp/rclone_sync.log 2>&1"
-    (crontab -l 2>/dev/null | grep -v "nedovision-benchmark"; echo "$cron_line") | crontab -
-
-    success "Auto-sync: every 5 min → minio:${bucket}/${tag}"
-}
-
-start_autosync "$CORE_DIR/$OUTPUT_DIR" "$RUN_TAG"
-
 # ─── Build commands ───────────────────────────────────────────────────────────
 
 # Shared prefix untuk semua command
-BASE="cd $CORE_DIR && source .venv/bin/activate"
+BASE="cd $CORE_DIR && source .venv/bin/activate && set -o pipefail"
 BENCH_PREFIX="CORE_STORAGE_PATH=\"../data\" python -m benchmark"
 COMMON_FLAGS="--device $DEVICE --warmup $WARMUP --no-speed --markdown --pdf-charts --storage-path \"../data\" --output-dir $OUTPUT_DIR"
+BACKUP_CMD="echo '' \
+  && echo '>>> Backup to ${SEAWEEDFS_REMOTE}:${SEAWEEDFS_BUCKET}/${RUN_TAG} starting...' \
+  && if command -v rclone >/dev/null 2>&1 && rclone lsd \"${SEAWEEDFS_REMOTE}:\" >/dev/null 2>&1; then \
+       rclone mkdir \"${SEAWEEDFS_REMOTE}:${SEAWEEDFS_BUCKET}/${RUN_TAG}\" 2>/dev/null || true; \
+       rclone sync \"$CORE_DIR/$OUTPUT_DIR\" \"${SEAWEEDFS_REMOTE}:${SEAWEEDFS_BUCKET}/${RUN_TAG}\" --log-file /tmp/rclone_sync.log; \
+       echo '=== BACKUP DONE ==='; \
+     else \
+       echo '[WARN] rclone or SeaweedFS remote unavailable; backup skipped.'; \
+     fi"
 
 CMD_CORE="${BASE} && ${BENCH_PREFIX} \
   --experiment e1 e2 e3 e4 \
@@ -165,7 +149,8 @@ SEQUENTIAL_CMD="${CMD_CORE} \
   && echo '>>> [3/3] B3 schema consistency starting...' \
   && ${CMD_B3} \
   && echo '' \
-  && echo '=== ALL EXPERIMENTS DONE ==='"
+  && echo '=== ALL EXPERIMENTS DONE ===' \
+  && ${BACKUP_CMD}"
 
 # ─── Prepare B3 video ─────────────────────────────────────────────────────────
 VIDEO_DIR="$WORKDIR"
@@ -176,7 +161,7 @@ SAMPLE_URL="https://raw.githubusercontent.com/jhiven/nedo-vision-experiment-scri
 
 info "Preparing B3 video..."
 
-if [[ ! -f "$SAMPLE_100X" ]]; then
+if [[ "$B3_VIDEO_PATH" == "$DEFAULT_B3_VIDEO_PATH" && ! -f "$SAMPLE_100X" ]]; then
     if [[ ! -f "$SAMPLE_RAW" ]]; then
         info "Downloading sample2.mp4..."
         wget -q --show-progress "$SAMPLE_URL" -O "$SAMPLE_RAW" \
@@ -195,9 +180,13 @@ if [[ ! -f "$SAMPLE_100X" ]]; then
         || die "ffmpeg step 2 failed (loop 100x)"
 
     success "B3 video ready: $SAMPLE_100X"
-else
+elif [[ "$B3_VIDEO_PATH" == "$DEFAULT_B3_VIDEO_PATH" ]]; then
     warn "sample2_100x.mp4 already exists, skipping video preparation."
+else
+    info "Using custom B3 video path: $B3_VIDEO_PATH"
 fi
+
+[[ -f "$B3_VIDEO_PATH" ]] || die "B3 video not found at: $B3_VIDEO_PATH. Set B3_VIDEO_PATH or place video there."
 
 # ─── Launch tmux ──────────────────────────────────────────────────────────────
 info "Starting tmux session: $SESSION"
@@ -227,3 +216,4 @@ echo -e "Detach : ${CYAN}Ctrl+B then D${NC}"
 echo ""
 echo -e "${YELLOW}B3 video path: ${B3_VIDEO_PATH}${NC}"
 echo -e "${YELLOW}B2 RTSP: ${RTMP_SERVER}${NC}"
+echo -e "${YELLOW}Backup target: ${SEAWEEDFS_REMOTE}:${SEAWEEDFS_BUCKET}/${RUN_TAG}${NC}"
