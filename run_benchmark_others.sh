@@ -5,7 +5,7 @@
 # Estimated time  : ~2 hours
 #
 # Required env vars:
-#   RTMP_SERVER     — RTSP stream URL (required for B2)
+#   B2_PIPELINE_ID   — pipeline ID for B2 config-swap (default: RF-DETR swap pair)
 #
 # Optional env vars:
 #   RUN_TAG         — label appended to output dir (default: current datetime)
@@ -60,14 +60,14 @@ B3_MODEL_IDS=(
     019661ad-c7f2-7e9a-9a0c-43bd9053b435
 )
 
-B2_PIPELINE_ID="3cf5199c-7833-4289-a107-bcb2acdf4b37"
+B2_PIPELINE_ID_DEFAULT="019dff93-a84b-7964-85d5-0a0126dca772"
+B2_PIPELINE_ID="${B2_PIPELINE_ID:-$B2_PIPELINE_ID_DEFAULT}"
+B2_MANUAL_CSV_URL="https://raw.githubusercontent.com/jhiven/nedo-vision-experiment-script/refs/heads/main/b2_hardcoded_manual.csv"
+B2_MANUAL_CSV_PATH="$OUTPUT_DIR/b2/b2_hardcoded_manual.csv"
 
 # B3 video path — override via env if your video is elsewhere
 DEFAULT_B3_VIDEO_PATH="$HOME/nedovision/sample2_100x.mp4"
 B3_VIDEO_PATH="${B3_VIDEO_PATH:-$DEFAULT_B3_VIDEO_PATH}"
-
-# ─── Guards ───────────────────────────────────────────────────────────────────
-[[ -z "${RTMP_SERVER:-}" ]] && die "RTMP_SERVER is not set. B2 requires a live RTSP stream. Export it before running."
 
 # ─── Pre-flight ───────────────────────────────────────────────────────────────
 [[ -d "$CORE_DIR" ]] || die "worker-core not found at $CORE_DIR. Run setup.sh first."
@@ -120,7 +120,6 @@ CMD_B1="${BASE} && ${BENCH_PREFIX} \
 CMD_B2="${BASE} && ${BENCH_PREFIX} \
   --experiment b2 \
   --source rtsp \
-  --rtmp-server ${RTMP_SERVER} \
   --b2-pipeline-id ${B2_PIPELINE_ID} \
   --b2-model-ids ${B2_MODEL_IDS[*]} \
   --b2-trials 30 \
@@ -151,6 +150,17 @@ SEQUENTIAL_CMD="${CMD_CORE} \
   && echo '' \
   && echo '=== ALL EXPERIMENTS DONE ===' \
   && ${BACKUP_CMD}"
+
+# ─── Prepare B2 manual CSV ────────────────────────────────────────────────────
+info "Preparing B2 manual CSV..."
+mkdir -p "$(dirname "$B2_MANUAL_CSV_PATH")"
+if [[ ! -f "$B2_MANUAL_CSV_PATH" ]]; then
+    wget -q --show-progress "$B2_MANUAL_CSV_URL" -O "$B2_MANUAL_CSV_PATH" \
+        || die "Failed to download b2_hardcoded_manual.csv"
+    success "B2 manual CSV ready: $B2_MANUAL_CSV_PATH"
+else
+    warn "b2_hardcoded_manual.csv already exists, skipping download."
+fi
 
 # ─── Prepare B3 video ─────────────────────────────────────────────────────────
 VIDEO_DIR="$WORKDIR"
@@ -215,5 +225,4 @@ echo -e "Attach : ${CYAN}tmux attach -t $SESSION${NC}"
 echo -e "Detach : ${CYAN}Ctrl+B then D${NC}"
 echo ""
 echo -e "${YELLOW}B3 video path: ${B3_VIDEO_PATH}${NC}"
-echo -e "${YELLOW}B2 RTSP: ${RTMP_SERVER}${NC}"
 echo -e "${YELLOW}Backup target: ${SEAWEEDFS_REMOTE}:${SEAWEEDFS_BUCKET}/${RUN_TAG}${NC}"
