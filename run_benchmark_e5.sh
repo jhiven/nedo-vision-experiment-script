@@ -10,6 +10,7 @@
 #   bash run_benchmark_e5.sh
 #
 # Optional env overrides:
+#   E2_DURATION_SECS — duration for E5 child runs (default: 43200 seconds = 12 hours)
 #   RTMP_SERVER   — set to rtsp://... to use live source instead of dummy
 #   RUN_TAG       — label appended to output dir (default: current datetime)
 #   SEAWEEDFS_REMOTE — rclone remote name configured by setup.sh (default: seaweedfs_s3)
@@ -33,7 +34,7 @@ SEAWEEDFS_REMOTE="${SEAWEEDFS_REMOTE:-seaweedfs_s3}"
 SEAWEEDFS_BUCKET="${SEAWEEDFS_BUCKET:-personal}"
 
 # 12 jam per child run (hardcoded runs first, then DAG)
-E5_DURATION_SECS=43200
+E5_DURATION_SECS="${E5_DURATION_SECS:-43200}"
 
 DEVICE="cuda"
 WARMUP=100   # cli.py enforces min 50 for cuda; using 100 for safety
