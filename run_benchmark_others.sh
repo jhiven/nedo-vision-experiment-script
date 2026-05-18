@@ -236,11 +236,11 @@ SEQUENTIAL_CMD=""
 for i in "${!RUN_STEPS[@]}"; do
     step_no=$((i + 1))
     total=${#RUN_STEPS[@]}
-    if [[ -n "$SEQUENTIAL_CMD" ]]; then
-        SEQUENTIAL_CMD+=" && echo ''"
+    if [[ -z "$SEQUENTIAL_CMD" ]]; then
+        SEQUENTIAL_CMD="echo '>>> [${step_no}/${total}] ${RUN_LABELS[$i]} starting...' && ${RUN_STEPS[$i]}"
+    else
+        SEQUENTIAL_CMD+=" && echo '' && echo '>>> [${step_no}/${total}] ${RUN_LABELS[$i]} starting...' && ${RUN_STEPS[$i]}"
     fi
-    SEQUENTIAL_CMD+=" && echo '>>> [${step_no}/${total}] ${RUN_LABELS[$i]} starting...'"
-    SEQUENTIAL_CMD+=" && ${RUN_STEPS[$i]}"
 done
 SEQUENTIAL_CMD+=" && echo '' && echo '=== ALL SELECTED EXPERIMENTS DONE ===' && ${BACKUP_CMD}"
 
