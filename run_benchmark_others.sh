@@ -118,15 +118,6 @@ deactivate
 BASE="cd $CORE_DIR && source .venv/bin/activate && set -o pipefail"
 BENCH_PREFIX="CORE_STORAGE_PATH=\"../data\" python -m benchmark"
 COMMON_FLAGS="--device $DEVICE --warmup $WARMUP --no-speed --markdown --pdf-charts --storage-path \"../data\" --output-dir $OUTPUT_DIR"
-BACKUP_CMD="echo '' \
-  && echo '>>> Backup to ${SEAWEEDFS_REMOTE}:${SEAWEEDFS_BUCKET}/${RUN_TAG} starting...' \
-  && if command -v rclone >/dev/null 2>&1 && rclone lsd \"${SEAWEEDFS_REMOTE}:\" >/dev/null 2>&1; then \
-       rclone mkdir \"${SEAWEEDFS_REMOTE}:${SEAWEEDFS_BUCKET}/${RUN_TAG}\" 2>/dev/null || true; \
-       rclone sync \"$CORE_DIR/$OUTPUT_DIR\" \"${SEAWEEDFS_REMOTE}:${SEAWEEDFS_BUCKET}/${RUN_TAG}\" --log-file /tmp/rclone_sync.log; \
-       echo '=== BACKUP DONE ==='; \
-     else \
-       echo '[WARN] rclone or SeaweedFS remote unavailable; backup skipped.'; \
-     fi"
 
 CMD_E1="${BASE} && ${BENCH_PREFIX} \
     --experiment e1 \
@@ -232,17 +223,36 @@ if [[ ${#RUN_STEPS[@]} -eq 0 ]]; then
     die "No valid benchmarks selected. Use: e1 e2 e3 e4 b1 b2 b3"
 fi
 
-SEQUENTIAL_CMD=""
-for i in "${!RUN_STEPS[@]}"; do
-    step_no=$((i + 1))
-    total=${#RUN_STEPS[@]}
-    if [[ -z "$SEQUENTIAL_CMD" ]]; then
-        SEQUENTIAL_CMD="echo '>>> [${step_no}/${total}] ${RUN_LABELS[$i]} starting...' && ${RUN_STEPS[$i]}"
-    else
-        SEQUENTIAL_CMD+=" && echo '' && echo '>>> [${step_no}/${total}] ${RUN_LABELS[$i]} starting...' && ${RUN_STEPS[$i]}"
-    fi
-done
-SEQUENTIAL_CMD+=" && echo '' && echo '=== ALL SELECTED EXPERIMENTS DONE ===' && ${BACKUP_CMD}"
+RUN_SCRIPT="$CORE_DIR/$OUTPUT_DIR/run_selected.sh"
+{
+    echo "#!/usr/bin/env bash"
+    echo "set -euo pipefail"
+    echo ""
+    echo "SEAWEEDFS_REMOTE=\"${SEAWEEDFS_REMOTE}\""
+    echo "SEAWEEDFS_BUCKET=\"${SEAWEEDFS_BUCKET}\""
+    echo "RUN_TAG=\"${RUN_TAG}\""
+    echo "CORE_DIR=\"${CORE_DIR}\""
+    echo "OUTPUT_DIR=\"${OUTPUT_DIR}\""
+    echo ""
+    for i in "${!RUN_STEPS[@]}"; do
+        step_no=$((i + 1))
+        total=${#RUN_STEPS[@]}
+        echo "echo '>>> [${step_no}/${total}] ${RUN_LABELS[$i]} starting...'"
+        printf '%s\n' "${RUN_STEPS[$i]}"
+        echo "echo ''"
+    done
+    echo "echo '=== ALL SELECTED EXPERIMENTS DONE ==='"
+    echo "echo ''"
+    echo "echo '>>> Backup to ${SEAWEEDFS_REMOTE}:${SEAWEEDFS_BUCKET}/${RUN_TAG} starting...'"
+    echo "if command -v rclone >/dev/null 2>&1 && rclone lsd \"${SEAWEEDFS_REMOTE}:\" >/dev/null 2>&1; then"
+    echo "  rclone mkdir \"${SEAWEEDFS_REMOTE}:${SEAWEEDFS_BUCKET}/${RUN_TAG}\" 2>/dev/null || true"
+    echo "  rclone sync \"${CORE_DIR}/${OUTPUT_DIR}\" \"${SEAWEEDFS_REMOTE}:${SEAWEEDFS_BUCKET}/${RUN_TAG}\" --log-file /tmp/rclone_sync.log"
+    echo "  echo '=== BACKUP DONE ==='"
+    echo "else"
+    echo "  echo '[WARN] rclone or SeaweedFS remote unavailable; backup skipped.'"
+    echo "fi"
+} > "$RUN_SCRIPT"
+chmod +x "$RUN_SCRIPT"
 
 # ─── Prepare B2 manual CSV ────────────────────────────────────────────────────
 info "Preparing B2 manual CSV..."
@@ -297,7 +307,7 @@ tmux kill-session -t "$SESSION" 2>/dev/null || true
 tmux new-session -d -s "$SESSION" -n "benchmark" -x 220 -y 50
 
 # Window 1: semua experiments sequential dalam 1 window
-tmux send-keys -t "$SESSION:benchmark" "$SEQUENTIAL_CMD" Enter
+tmux send-keys -t "$SESSION:benchmark" "$RUN_SCRIPT" Enter
 
 # Window 2: GPU + disk monitor
 tmux new-window -t "$SESSION" -n "monitor"
