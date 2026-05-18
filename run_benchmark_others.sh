@@ -23,6 +23,17 @@ success() { echo -e "${GREEN}[OK]${NC} $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC} $*"; }
 die()     { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
 
+usage() {
+        cat <<'USAGE'
+Usage: run_benchmark_others.sh [e1 e2 e3 e4 b1 b2 b3]
+
+If no benchmark names are provided, all benchmarks run in sequence.
+
+Options:
+    -h, --help   Show this help message
+USAGE
+}
+
 CORE_DIR="$HOME/nedovision/nedo-vision-worker-core-v2"
 SESSION="nedovision-benchmark"
 RUN_TAG="${RUN_TAG:-$(date +%Y%m%d_%H%M)}"
@@ -35,6 +46,20 @@ DEVICE="cuda"
 WARMUP=50
 SOURCE="dummy"
 DURATION=300   # seconds per experiment/level
+
+# Selected benchmarks: e1, e2, e3, e4, b1, b2, b3. If empty, run all.
+BENCH_SELECTION=()
+for arg in "$@"; do
+    case "$arg" in
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            BENCH_SELECTION+=("$arg")
+            ;;
+    esac
+done
 
 # ─── Fixed model IDs from registry ───────────────────────────────────────────
 # B1 models: yolov8n, yolov8s, yolov8m (or equivalent UUIDs)
@@ -103,12 +128,33 @@ BACKUP_CMD="echo '' \
        echo '[WARN] rclone or SeaweedFS remote unavailable; backup skipped.'; \
      fi"
 
-CMD_CORE="${BASE} && ${BENCH_PREFIX} \
-  --experiment e1 e2 e3 e4 \
-  --source $SOURCE \
-  --duration $DURATION \
-  ${COMMON_FLAGS} \
-  2>&1 | tee ${OUTPUT_DIR}/core_run.log"
+CMD_E1="${BASE} && ${BENCH_PREFIX} \
+    --experiment e1 \
+    --source $SOURCE \
+    --duration $DURATION \
+    ${COMMON_FLAGS} \
+    2>&1 | tee ${OUTPUT_DIR}/e1_run.log"
+
+CMD_E2="${BASE} && ${BENCH_PREFIX} \
+    --experiment e2 \
+    --source $SOURCE \
+    --duration $DURATION \
+    ${COMMON_FLAGS} \
+    2>&1 | tee ${OUTPUT_DIR}/e2_run.log"
+
+CMD_E3="${BASE} && ${BENCH_PREFIX} \
+    --experiment e3 \
+    --source $SOURCE \
+    --duration $DURATION \
+    ${COMMON_FLAGS} \
+    2>&1 | tee ${OUTPUT_DIR}/e3_run.log"
+
+CMD_E4="${BASE} && ${BENCH_PREFIX} \
+    --experiment e4 \
+    --source $SOURCE \
+    --duration $DURATION \
+    ${COMMON_FLAGS} \
+    2>&1 | tee ${OUTPUT_DIR}/e4_run.log"
 
 CMD_B1="${BASE} && ${BENCH_PREFIX} \
   --experiment b1 \
@@ -136,20 +182,67 @@ CMD_B3="${BASE} && ${BENCH_PREFIX} \
   ${COMMON_FLAGS} \
   2>&1 | tee ${OUTPUT_DIR}/b3_run.log"
 
-# Sequential runner — jalan satu per satu, berhenti kalau ada yang gagal
-SEQUENTIAL_CMD="${CMD_CORE} \
-  && echo '' \
-  && echo '>>> [1/3] B1 cold-start starting...' \
-  && ${CMD_B1} \
-  && echo '' \
-  && echo '>>> [2/3] B2 config-swap starting...' \
-  && ${CMD_B2} \
-  && echo '' \
-  && echo '>>> [3/3] B3 schema consistency starting...' \
-  && ${CMD_B3} \
-  && echo '' \
-  && echo '=== ALL EXPERIMENTS DONE ===' \
-  && ${BACKUP_CMD}"
+# Sequential runner — run only selected benchmarks, stop on error
+declare -a RUN_STEPS=()
+declare -a RUN_LABELS=()
+
+add_step() {
+    local label="$1"; shift
+    local cmd="$1"
+    RUN_LABELS+=("$label")
+    RUN_STEPS+=("$cmd")
+}
+
+want_bench() {
+    local name="$1"
+    if [[ ${#BENCH_SELECTION[@]} -eq 0 ]]; then
+        return 0
+    fi
+    for sel in "${BENCH_SELECTION[@]}"; do
+        if [[ "$sel" == "$name" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+if want_bench "e1"; then
+    add_step "E1" "$CMD_E1"
+fi
+if want_bench "e2"; then
+    add_step "E2" "$CMD_E2"
+fi
+if want_bench "e3"; then
+    add_step "E3" "$CMD_E3"
+fi
+if want_bench "e4"; then
+    add_step "E4" "$CMD_E4"
+fi
+if want_bench "b1"; then
+    add_step "B1 cold-start" "$CMD_B1"
+fi
+if want_bench "b2"; then
+    add_step "B2 config-swap" "$CMD_B2"
+fi
+if want_bench "b3"; then
+    add_step "B3 schema consistency" "$CMD_B3"
+fi
+
+if [[ ${#RUN_STEPS[@]} -eq 0 ]]; then
+    die "No valid benchmarks selected. Use: e1 e2 e3 e4 b1 b2 b3"
+fi
+
+SEQUENTIAL_CMD=""
+for i in "${!RUN_STEPS[@]}"; do
+    step_no=$((i + 1))
+    total=${#RUN_STEPS[@]}
+    if [[ -n "$SEQUENTIAL_CMD" ]]; then
+        SEQUENTIAL_CMD+=" && echo ''"
+    fi
+    SEQUENTIAL_CMD+=" && echo '>>> [${step_no}/${total}] ${RUN_LABELS[$i]} starting...'"
+    SEQUENTIAL_CMD+=" && ${RUN_STEPS[$i]}"
+done
+SEQUENTIAL_CMD+=" && echo '' && echo '=== ALL SELECTED EXPERIMENTS DONE ===' && ${BACKUP_CMD}"
 
 # ─── Prepare B2 manual CSV ────────────────────────────────────────────────────
 info "Preparing B2 manual CSV..."
@@ -216,10 +309,13 @@ echo -e "${BOLD}Benchmark session started: $SESSION${NC}"
 echo -e "${BOLD}Output dir :${NC} $CORE_DIR/$OUTPUT_DIR"
 echo ""
 echo -e "${BOLD}Execution order (sequential, auto-stop on error):${NC}"
-echo -e "  1. E1 E2 E3 E4   (~$(( DURATION * 4 * 2 / 60 )) min)"
-echo -e "  2. B1             (30 trials x 3 models)"
-echo -e "  3. B2             (30 trials x 4 swap pairs, needs RTSP)"
-echo -e "  4. B3             (100 frames x 3 models)"
+echo -e "  1. E1             (~$(( DURATION * 2 / 60 )) min)"
+echo -e "  2. E2             (~$(( DURATION * 2 / 60 )) min)"
+echo -e "  3. E3             (~$(( DURATION * 2 / 60 )) min)"
+echo -e "  4. E4             (~$(( DURATION * 2 / 60 )) min)"
+echo -e "  5. B1             (30 trials x 3 models)"
+echo -e "  6. B2             (30 trials x 4 swap pairs, needs RTSP)"
+echo -e "  7. B3             (100 frames x 3 models)"
 echo ""
 echo -e "Attach : ${CYAN}tmux attach -t $SESSION${NC}"
 echo -e "Detach : ${CYAN}Ctrl+B then D${NC}"

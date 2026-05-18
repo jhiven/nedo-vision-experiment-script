@@ -10,7 +10,7 @@
 #   bash run_benchmark_e5.sh
 #
 # Optional env overrides:
-#   E2_DURATION_SECS — duration for E5 child runs (default: 43200 seconds = 12 hours)
+#   E5_DURATION_SECS — duration for E5 child runs (default: 43200 seconds = 12 hours)
 #   RTMP_SERVER   — set to rtsp://... to use live source instead of dummy
 #   RUN_TAG       — label appended to output dir (default: current datetime)
 #   SEAWEEDFS_REMOTE — rclone remote name configured by setup.sh (default: seaweedfs_s3)
