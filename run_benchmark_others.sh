@@ -116,7 +116,7 @@ deactivate
 
 # Shared prefix untuk semua command
 BASE="cd $CORE_DIR && source .venv/bin/activate && set -o pipefail"
-BENCH_PREFIX="CORE_STORAGE_PATH=\"../data\" python -m benchmark"
+BENCH_PREFIX="STORAGE_PATH=\"../data\" CORE_STORAGE_PATH=\"../data\" python -m benchmark"
 COMMON_FLAGS="--device $DEVICE --warmup $WARMUP --no-speed --markdown --pdf-charts --storage-path \"../data\" --output-dir $OUTPUT_DIR"
 
 CMD_E1="${BASE} && ${BENCH_PREFIX} \

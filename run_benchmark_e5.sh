@@ -79,6 +79,7 @@ BACKUP_CMD="echo '' \
 
 BENCH_CMD="cd $CORE_DIR && source .venv/bin/activate && set -o pipefail && \
 CORE_STORAGE_PATH=\"../data\" \
+STORAGE_PATH=\"../data\" \
 python -m benchmark \
   --experiment e5 \
   --device $DEVICE \
